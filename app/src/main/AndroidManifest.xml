@@ -1,13 +1,265 @@
-<manifest xmlns:android="http://schemas.android.com/apk/res/android">
-<uses-permission android:name="android.permission.INTERNET"/>
-<uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
-<uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION"/>
-<application android:allowBackup="false" android:label="Tak Remote" android:theme="@android:style/Theme.Material.Light.NoActionBar" android:usesCleartextTraffic="false">android:icon="@android:drawable/sym_def_app_icon"
-<activity android:name=".MainActivity" android:exported="true">
-<intent-filter>
-<action android:name="android.intent.action.MAIN"/>
-<category android:name="android.intent.category.LAUNCHER"/>
-</intent-filter>
-</activity>
-</application>
-</manifest>
+package com.takremote.app;
+
+import android.app.Activity;
+import android.app.AlertDialog;
+import android.graphics.Color;
+import android.graphics.Typeface;
+import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
+import android.text.InputType;
+import android.view.Gravity;
+import android.widget.Button;
+import android.widget.EditText;
+import android.widget.LinearLayout;
+import android.widget.TextView;
+import android.widget.Toast;
+
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.io.OutputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
+import java.util.Random;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+
+public class MainActivity extends Activity {
+
+    private static final String DB_URL = "https://takremote-default-rtdb.asia-southeast1.firebasedatabase.app/rooms/";
+    private TextView statusText;
+    private TextView codeDisplayText;
+    private Button btnController;
+    private Button btnReceiver;
+
+    private final ExecutorService executor = Executors.newSingleThreadExecutor();
+    private final Handler mainHandler = new Handler(Looper.getMainLooper());
+    private boolean isPolling = false;
+    private String activeRoomCode = null;
+
+    @Override
+    protected void onCreate(Bundle savedInstanceState) {
+        super.onCreate(savedInstanceState);
+
+        LinearLayout layout = new LinearLayout(this);
+        layout.setOrientation(LinearLayout.VERTICAL);
+        layout.setGravity(Gravity.CENTER);
+        layout.setPadding(60, 60, 60, 60);
+        layout.setBackgroundColor(Color.parseColor("#F5F5F5"));
+
+        TextView title = new TextView(this);
+        title.setText("TAK REMOTE");
+        title.setTextSize(28);
+        title.setTypeface(null, Typeface.BOLD);
+        title.setTextColor(Color.parseColor("#212121"));
+        title.setGravity(Gravity.CENTER);
+        layout.addView(title);
+
+        TextView subtitle = new TextView(this);
+        subtitle.setText("पहला सुरक्षित प्रोटोटाइप");
+        subtitle.setTextSize(16);
+        subtitle.setTextColor(Color.parseColor("#616161"));
+        subtitle.setGravity(Gravity.CENTER);
+        subtitle.setPadding(0, 16, 0, 40);
+        layout.addView(subtitle);
+
+        btnController = new Button(this);
+        btnController.setText("CONTROLLER MODE (कंट्रोल करें)");
+        btnController.setBackgroundColor(Color.parseColor("#1976D2"));
+        btnController.setTextColor(Color.WHITE);
+        btnController.setPadding(20, 30, 20, 30);
+        LinearLayout.LayoutParams btnParams = new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT
+        );
+        btnParams.setMargins(0, 0, 0, 30);
+        btnController.setLayoutParams(btnParams);
+        layout.addView(btnController);
+
+        btnReceiver = new Button(this);
+        btnReceiver.setText("RECEIVER MODE (स्क्रीन दिखाएं)");
+        btnReceiver.setBackgroundColor(Color.parseColor("#388E3C"));
+        btnReceiver.setTextColor(Color.WHITE);
+        btnReceiver.setPadding(20, 30, 20, 30);
+        btnReceiver.setLayoutParams(btnParams);
+        layout.addView(btnReceiver);
+
+        codeDisplayText = new TextView(this);
+        codeDisplayText.setText("");
+        codeDisplayText.setTextSize(32);
+        codeDisplayText.setTypeface(null, Typeface.BOLD);
+        codeDisplayText.setTextColor(Color.parseColor("#D32F2F"));
+        codeDisplayText.setGravity(Gravity.CENTER);
+        codeDisplayText.setPadding(0, 30, 0, 10);
+        layout.addView(codeDisplayText);
+
+        statusText = new TextView(this);
+        statusText.setText("Status: Not connected");
+        statusText.setTextSize(16);
+        statusText.setTextColor(Color.parseColor("#424242"));
+        statusText.setGravity(Gravity.CENTER);
+        statusText.setPadding(0, 20, 0, 0);
+        layout.addView(statusText);
+
+        setContentView(layout);
+
+        btnReceiver.setOnClickListener(v -> startReceiverPairing());
+        btnController.setOnClickListener(v -> showControllerDialog());
+    }
+
+    private void startReceiverPairing() {
+        isPolling = false;
+        int randomCode = 100000 + new Random().nextInt(900000);
+        activeRoomCode = String.valueOf(randomCode);
+
+        codeDisplayText.setText("Code: " + activeRoomCode);
+        statusText.setText("Status: Waiting for Controller...");
+
+        executor.execute(() -> {
+            try {
+                URL url = new URL(DB_URL + activeRoomCode + ".json");
+                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                conn.setRequestMethod("PUT");
+                conn.setRequestProperty("Content-Type", "application/json");
+                conn.setDoOutput(true);
+
+                JSONObject json = new JSONObject();
+                json.put("status", "waiting");
+                json.put("created", System.currentTimeMillis());
+
+                try (OutputStream os = conn.getOutputStream()) {
+                    os.write(json.toString().getBytes("UTF-8"));
+                }
+
+                int responseCode = conn.getResponseCode();
+                if (responseCode == 200) {
+                    isPolling = true;
+                    pollForController(activeRoomCode);
+                } else {
+                    mainHandler.post(() -> statusText.setText("Status: Server Error (" + responseCode + ")"));
+                }
+            } catch (Exception e) {
+                mainHandler.post(() -> statusText.setText("Status: Internet Error"));
+            }
+        });
+    }
+
+    private void pollForController(String code) {
+        executor.execute(() -> {
+            while (isPolling && code.equals(activeRoomCode)) {
+                try {
+                    Thread.sleep(2000);
+                    URL url = new URL(DB_URL + code + ".json");
+                    HttpURLConnection conn = (HttpURLConnection) url.openConnection();
+                    conn.setRequestMethod("GET");
+
+                    if (conn.getResponseCode() == 200) {
+                        BufferedReader reader = new BufferedReader(new InputStreamReader(conn.getInputStream()));
+                        StringBuilder sb = new StringBuilder();
+                        String line;
+                        while ((line = reader.readLine()) != null) sb.append(line);
+                        reader.close();
+
+                        String resp = sb.toString();
+                        if (resp != null && !resp.equals("null")) {
+                            JSONObject json = new JSONObject(resp);
+                            if ("connected".equals(json.optString("status"))) {
+                                isPolling = false;
+                                mainHandler.post(() -> {
+                                    statusText.setText("Status: Connected to Controller!");
+                                    statusText.setTextColor(Color.parseColor("#2E7D32"));
+                                    Toast.makeText(MainActivity.this, "Controller जुड़ गया है!", Toast.LENGTH_LONG).show();
+                                });
+                            }
+                        }
+                    }
+                } catch (Exception ignored) {
+                }
+            }
+        });
+    }
+
+    private void showControllerDialog() {
+        isPolling = false;
+        codeDisplayText.setText("");
+
+        EditText input = new EditText(this);
+        input.setInputType(InputType.TYPE_CLASS_NUMBER);
+        input.setHint("6-digit Pairing Code डालें");
+        input.setGravity(Gravity.CENTER);
+        input.setTextSize(22);
+
+        new AlertDialog.Builder(this)
+                .setTitle("Controller Mode")
+                .setMessage("Receiver फोन पर दिख रहा 6-अंकों का कोड डालें:")
+                .setView(input)
+                .setPositiveButton("Connect", (dialog, which) -> {
+                    String enteredCode = input.getText().toString().trim();
+                    if (enteredCode.length() == 6) {
+                        connectAsController(enteredCode);
+                    } else {
+                        Toast.makeText(this, "कृपया सही 6-digit कोड डालें", Toast.LENGTH_SHORT).show();
+                    }
+                })
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void connectAsController(String code) {
+        statusText.setText("Status: Connecting to " + code + "...");
+        executor.execute(() -> {
+            try {
+                URL url = new URL(DB_URL + code + ".json");
+                HttpURLConnection getConn = (HttpURLConnection) url.openConnection();
+                getConn.setRequestMethod("GET");
+
+                if (getConn.getResponseCode() == 200) {
+                    BufferedReader reader = new BufferedReader(new InputStreamReader(getConn.getInputStream()));
+                    StringBuilder sb = new StringBuilder();
+                    String line;
+                    while ((line = reader.readLine()) != null) sb.append(line);
+                    reader.close();
+
+                    String resp = sb.toString();
+                    if (resp == null || resp.equals("null")) {
+                        mainHandler.post(() -> statusText.setText("Status: Invalid Code! कोड गलत है।"));
+                        return;
+                    }
+
+                    HttpURLConnection patchConn = (HttpURLConnection) url.openConnection();
+                    patchConn.setRequestMethod("POST");
+                    patchConn.setRequestProperty("X-HTTP-Method-Override", "PATCH");
+                    patchConn.setRequestProperty("Content-Type", "application/json");
+                    patchConn.setDoOutput(true);
+
+                    JSONObject update = new JSONObject();
+                    update.put("status", "connected");
+
+                    try (OutputStream os = patchConn.getOutputStream()) {
+                        os.write(update.toString().getBytes("UTF-8"));
+                    }
+
+                    if (patchConn.getResponseCode() == 200) {
+                        mainHandler.post(() -> {
+                            codeDisplayText.setText("Room: " + code);
+                            statusText.setText("Status: Connected to Receiver!");
+                            statusText.setTextColor(Color.parseColor("#2E7D32"));
+                            Toast.makeText(MainActivity.this, "सफलतापूर्वक कनेक्ट हो गया!", Toast.LENGTH_LONG).show();
+                        });
+                    }
+                }
+            } catch (Exception e) {
+                mainHandler.post(() -> statusText.setText("Status: Connection Failed"));
+            }
+        });
+    }
+
+    @Override
+    protected void onDestroy() {
+        super.onDestroy();
+        isPolling = false;
+        executor.shutdownNow();
+    }
+}
